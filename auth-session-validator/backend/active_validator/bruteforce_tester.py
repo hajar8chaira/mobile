@@ -89,10 +89,122 @@ class BruteforceTester:
         Returns:
             Evidence avec rate_limited, throttling_threshold
         """
-        # TODO: lancer requests_per_second requêtes/seconde pendant duration_seconds
-        # TODO: compter les 429 reçus
-        # TODO: calculer le seuil de déclenchement
-        raise NotImplementedError("test_rate_limiting — à implémenter")
+        evidence = {
+            "attack_type": "RATE_LIMITING_TEST",
+            "vulnerability_confirmed": False,
+            "rate_limited": False,
+            "throttling_threshold": None,
+            "total_requests": 0,
+            "rate_limit_responses": 0,
+            "successful_requests": 0,
+            "proof": []
+        }
+
+        try:
+            import asyncio
+
+            total_requests = requests_per_second * duration_seconds
+            evidence["total_requests"] = total_requests
+
+            # Lancer requests_per_second requêtes/seconde pendant duration_seconds
+            async def make_request(request_num: int) -> Dict[str, Any]:
+                """Effectue une requête individuelle."""
+                result = {
+                    "request_num": request_num,
+                    "status_code": None,
+                    "is_rate_limited": False,
+                    "error": None
+                }
+
+                try:
+                    async with httpx.AsyncClient(timeout=self.timeout) as client:
+                        # Utiliser des identifiants différents pour simuler des attaques
+                        test_data = {
+                            "username": f"test_user_{request_num}",
+                            "password": f"wrong_password_{request_num}"
+                        }
+
+                        response = await client.post(endpoint_url, data=test_data)
+                        result["status_code"] = response.status_code
+
+                        # Vérifier si c'est une réponse de rate limiting
+                        if response.status_code == 429:  # Too Many Requests
+                            result["is_rate_limited"] = True
+                        elif response.status_code == 403:  # Forbidden
+                            result["is_rate_limited"] = True
+
+                except Exception as e:
+                    result["error"] = str(e)
+
+                return result
+
+            # Créer les tâches de requêtes
+            evidence["steps"] = [f"Launching {total_requests} requests over {duration_seconds} seconds..."]
+
+            # Diviser en lots pour respecter le rate
+            all_results = []
+            for second in range(duration_seconds):
+                # Créer un lot de requêtes pour cette seconde
+                batch_tasks = [
+                    make_request(second * requests_per_second + i + 1)
+                    for i in range(requests_per_second)
+                ]
+
+                # Exécuter le lot
+                batch_results = await asyncio.gather(*batch_tasks)
+                all_results.extend(batch_results)
+
+                # Attendre 1 seconde avant le prochain lot
+                if second < duration_seconds - 1:
+                    await asyncio.sleep(1)
+
+            # Compter les 429 reçus
+            rate_limit_count = sum(
+                1 for result in all_results
+                if result["is_rate_limited"]
+            )
+
+            successful_count = sum(
+                1 for result in all_results
+                if result["status_code"] in [200, 201, 202] and not result["is_rate_limited"]
+            )
+
+            evidence["rate_limit_responses"] = rate_limit_count
+            evidence["successful_requests"] = successful_count
+
+            # Calculer le seuil de déclenchement
+            if rate_limit_count > 0:
+                evidence["rate_limited"] = True
+
+                # Trouver à quel moment le rate limiting a commencé
+                for i, result in enumerate(all_results):
+                    if result["is_rate_limited"]:
+                        evidence["throttling_threshold"] = i + 1
+                        evidence["proof"].append(
+                            f"Rate limiting activated after {i + 1} requests"
+                        )
+                        break
+
+                evidence["proof"].append(
+                    f"Rate limiting is working: {rate_limit_count}/{total_requests} requests were blocked"
+                )
+            else:
+                evidence["vulnerability_confirmed"] = True
+                evidence["proof"].append(
+                    f"VULNERABILITY: No rate limiting detected! All {total_requests} requests were accepted."
+                )
+
+            # Détails des réponses
+            evidence["response_details"] = {
+                "rate_limited": rate_limit_count,
+                "successful": successful_count,
+                "other_errors": len(all_results) - rate_limit_count - successful_count
+            }
+
+        except Exception as e:
+            evidence["proof"].append(f"Test failed: {str(e)}")
+
+        return evidence
 
     async def test_username_enumeration(
         self,

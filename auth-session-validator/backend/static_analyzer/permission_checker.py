@@ -52,11 +52,43 @@ def check_permissions(manifest_path: str) -> List[Dict[str, Any]]:
     Returns:
         Liste de findings : [{"permission", "severity", "cvss", "description", "owasp_ref"}, ...]
     """
-    # TODO: parser le XML avec ET.parse
-    # TODO: itérer sur les <uses-permission> tags
-    # TODO: vérifier chaque permission dans DANGEROUS_PERMISSIONS
-    # TODO: retourner les findings triés par cvss
-    raise NotImplementedError("check_permissions — à implémenter")
+    findings = []
+
+    if not os.path.exists(manifest_path):
+        return findings
+
+    try:
+        # Parser le XML avec ET.parse
+        tree = ET.parse(manifest_path)
+        root = tree.getroot()
+
+        # Itérer sur les <uses-permission> tags
+        for permission_elem in root.findall("uses-permission"):
+            permission_name = permission_elem.get(f"{{{ANDROID_NS}}}name")
+
+            if permission_name and permission_name in DANGEROUS_PERMISSIONS:
+                severity, cvss, description, owasp_ref = DANGEROUS_PERMISSIONS[permission_name]
+
+                findings.append({
+                    "type": "DANGEROUS_PERMISSION",
+                    "permission": permission_name,
+                    "severity": severity,
+                    "cvss": cvss,
+                    "description": description,
+                    "owasp_ref": owasp_ref,
+                    "file": manifest_path
+                })
+
+        # Retourner les findings triés par cvss
+        findings.sort(key=lambda x: x["cvss"], reverse=True)
+        return findings
+
+    except ET.ParseError as e:
+        print(f"Error parsing AndroidManifest.xml: {e}")
+        return findings
+    except Exception as e:
+        print(f"Error checking permissions: {e}")
+        return findings
 
 
 def check_exported_components(manifest_path: str) -> List[Dict[str, Any]]:
@@ -67,10 +99,49 @@ def check_exported_components(manifest_path: str) -> List[Dict[str, Any]]:
     Returns:
         Liste de composants exposés : [{"component_type", "name", "severity", "description"}, ...]
     """
-    # TODO: chercher les <activity>, <service>, <receiver>, <provider> avec android:exported="true"
-    # TODO: vérifier si android:permission est défini
-    # TODO: signaler les composants exportés sans protection
-    raise NotImplementedError("check_exported_components — à implémenter")
+    findings = []
+
+    if not os.path.exists(manifest_path):
+        return findings
+
+    try:
+        tree = ET.parse(manifest_path)
+        root = tree.getroot()
+
+        # Chercher les <activity>, <service>, <receiver>, <provider> avec android:exported="true"
+        component_types = [
+            ("activity", "Activity"),
+            ("service", "Service"),
+            ("receiver", "Broadcast Receiver"),
+            ("provider", "Content Provider")
+        ]
+
+        for tag_name, component_type in component_types:
+            for component in root.findall(tag_name):
+                exported = component.get(f"{{{ANDROID_NS}}}exported", "false")
+                permission = component.get(f"{{{ANDROID_NS}}}permission")
+                component_name = component.get(f"{{{ANDROID_NS}}}name", "unknown")
+
+                if exported.lower() == "true" and not permission:
+                    findings.append({
+                        "type": "EXPORTED_COMPONENT_NO_PROTECTION",
+                        "component_type": component_type,
+                        "name": component_name,
+                        "severity": "HIGH",
+                        "cvss": 7.5,
+                        "description": f"{component_type} '{component_name}' is exported without permission protection",
+                        "owasp_ref": "M1",
+                        "file": manifest_path
+                    })
+
+        return findings
+
+    except ET.ParseError as e:
+        print(f"Error parsing AndroidManifest.xml: {e}")
+        return findings
+    except Exception as e:
+        print(f"Error checking exported components: {e}")
+        return findings
 
 
 def check_debug_mode(manifest_path: str) -> List[Dict[str, Any]]:
@@ -80,8 +151,38 @@ def check_debug_mode(manifest_path: str) -> List[Dict[str, Any]]:
     Returns:
         Finding si debuggable = true
     """
-    # TODO: chercher android:debuggable="true" dans <application>
-    raise NotImplementedError("check_debug_mode — à implémenter")
+    findings = []
+
+    if not os.path.exists(manifest_path):
+        return findings
+
+    try:
+        tree = ET.parse(manifest_path)
+        root = tree.getroot()
+
+        # Chercher android:debuggable="true" dans <application>
+        application = root.find("application")
+        if application is not None:
+            debuggable = application.get(f"{{{ANDROID_NS}}}debuggable", "false")
+
+            if debuggable.lower() == "true":
+                findings.append({
+                    "type": "DEBUG_MODE_ENABLED",
+                    "severity": "HIGH",
+                    "cvss": 7.0,
+                    "description": "Application is compiled in debug mode, making it easier to reverse engineer and debug",
+                    "owasp_ref": "M9",
+                    "file": manifest_path
+                })
+
+        return findings
+
+    except ET.ParseError as e:
+        print(f"Error parsing AndroidManifest.xml: {e}")
+        return findings
+    except Exception as e:
+        print(f"Error checking debug mode: {e}")
+        return findings
 
 
 def check_backup_allowed(manifest_path: str) -> List[Dict[str, Any]]:
@@ -92,5 +193,35 @@ def check_backup_allowed(manifest_path: str) -> List[Dict[str, Any]]:
     Returns:
         Finding si allowBackup = true
     """
-    # TODO: chercher android:allowBackup dans <application>
-    raise NotImplementedError("check_backup_allowed — à implémenter")
+    findings = []
+
+    if not os.path.exists(manifest_path):
+        return findings
+
+    try:
+        tree = ET.parse(manifest_path)
+        root = tree.getroot()
+
+        # Chercher android:allowBackup dans <application>
+        application = root.find("application")
+        if application is not None:
+            allow_backup = application.get(f"{{{ANDROID_NS}}}allowBackup", "true")
+
+            if allow_backup.lower() == "true":
+                findings.append({
+                    "type": "BACKUP_ALLOWED",
+                    "severity": "MEDIUM",
+                    "cvss": 5.5,
+                    "description": "Application allows ADB backup, which could expose sensitive data",
+                    "owasp_ref": "M2",
+                    "file": manifest_path
+                })
+
+        return findings
+
+    except ET.ParseError as e:
+        print(f"Error parsing AndroidManifest.xml: {e}")
+        return findings
+    except Exception as e:
+        print(f"Error checking backup allowed: {e}")
+        return findings

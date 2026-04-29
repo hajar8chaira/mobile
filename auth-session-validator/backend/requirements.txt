@@ -9,7 +9,7 @@ mitmproxy>=10.1.0
 
 # Frida Instrumentation
 frida>=16.1.0
-frida-tools>=16.0.0
+frida-tools>=14.0.0
 
 # JWT Handling
 PyJWT>=2.8.0

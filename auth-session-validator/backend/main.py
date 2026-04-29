@@ -15,6 +15,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
+from contextlib import asynccontextmanager
 
 from config import UPLOAD_DIR, ROOT_DIR, JADX_PATH, get_target_server_path
 from dynamic_analyzer.proxy_manager import proxy_manager
@@ -104,7 +105,26 @@ def load_session():
 
 session_state = load_session()
 
-app = FastAPI(title="Auth and Session Analyzer API")
+# Lifespan context manager for startup/shutdown events
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup logic
+    print(f"[*] Démarrage serveur. État session : {session_state.get('package_name')}", flush=True)
+    if not proxy_manager.is_running:
+        asyncio.create_task(proxy_manager.start_async())
+        print("[*] Tâche Proxy MITM planifiée sur 8080", flush=True)
+
+    # Si une session APK est déjà là, on lance tout en tâche de fond
+    if session_state.get("package_name"):
+        print(f"[*] Planification setup automatique pour {session_state['package_name']}...", flush=True)
+        asyncio.create_task(trigger_auto_setup_internal())
+
+    yield  # Application runs here
+
+    # Shutdown logic (if needed)
+    print("[*] Arrêt du serveur...", flush=True)
+
+app = FastAPI(title="Auth and Session Analyzer API", lifespan=lifespan)
 
 # --- AUTH ENDPOINTS ---
 @app.post("/api/auth/register")
@@ -142,20 +162,6 @@ async def logout():
     session_state["logged_in_user"] = None
     return {"message": "Déconnexion réussie"}
 
-
-# Démarrage Automatique du Proxy
-@app.on_event("startup")
-async def startup_event():
-    import asyncio
-    print(f"[*] Démarrage serveur. État session : {session_state.get('package_name')}", flush=True)
-    if not proxy_manager.is_running:
-        asyncio.create_task(proxy_manager.start_async())
-        print("[*] Tâche Proxy MITM planifiée sur 8080", flush=True)
-    
-    # Si une session APK est déjà là, on lance tout en tâche de fond
-    if session_state.get("package_name"):
-        print(f"[*] Planification setup automatique pour {session_state['package_name']}...", flush=True)
-        asyncio.create_task(trigger_auto_setup_internal())
 
 app.add_middleware(
     CORSMiddleware,
